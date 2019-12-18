@@ -1,0 +1,144 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+%matplotlib inline
+import warnings
+warnings.filterwarnings("ignore")
+
+
+# EDA and Cleaning
+
+df = pd.read_csv('https://docs.google.com/spreadsheets/d/e/2PACX-1vQw9pANi2VIh8-bR7RH2HSpKpKrxjs_SIyM5eNB39edar4Va6DPHmsghXsy6uOcXlRcWn2Q1qFzn5an/pub?gid=0&single=true&output=csv')
+#df = pd.read_csv('https://docs.google.com/spreadsheets/d/e/2PACX-1vRjkND-e30EeUVvNza7QEyNuKEn-FHGVld1C2hxzvdi6CD6GCZENaXsFWS8Q0j_F5QbNiGZ7QLkbXZP/pub?gid=207100874&single=true&output=csv',encoding='latin', usecols=[0, 1,2])
+df.head()
+
+df['Date'] = df.Date.replace(' 16:56:00','',regex=True)
+for i in df.drop(['Date'],axis=1).columns:
+  df[i] = df[i].replace(',','.',regex=True)
+
+#data cleaning
+
+df.tail()
+
+df1= df.drop(['Date'],axis=1)
+df.Date = pd.to_datetime(df['Date'], format ='%d/%m/%Y')
+df[df1.columns] = df1.astype('float64')
+
+df.info()
+
+df.plot(x= 'Date',y='Close',kind='line')
+
+df['month'] = df['Date'].dt.month
+df['year'] = df['Date'].dt.year
+
+sns.lineplot(x='month',y='Close',data=df)
+
+fig, axs = plt.subplots(nrows=1, ncols=3, figsize=(15, 6))
+plt.xlim(left=1,right=12)
+sns.lineplot(x='month',y='Close',data=df[df.year == 2018], ax=axs[1])
+axs[1].set_title('2018')
+sns.lineplot(x='month',y='Close',data=df[df.year == 2019],ax=axs[0])
+axs[0].set_title('2019')
+sns.lineplot(x='month',y='Close',data=df[df.year == 2017], ax=axs[2])
+axs[2].set_title('2017')
+
+# Checking the last 3 years
+# ITUB4 pay dividends around May/June
+
+#ARIMA Modeling for Stock Time Series
+
+import statsmodels as sm
+from statsmodels.tsa.stattools import adfuller
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
+from statsmodels.tsa.arima_model import ARIMA
+import statsmodels.tsa.api as smt
+import statistics
+
+#Checking for stationarity
+df['diff'] = df['Close'] - df['Close'].shift(1)
+df.plot(kind='line',x='Date',y='diff', figsize = (10, 8))
+
+todrop = df[(df['diff'] > 10) | (df['diff']<-10)]
+df.drop(todrop.index,inplace=True)
+#droping "outlier"
+df.plot(kind='line',x='Date',y='diff', figsize = (10, 8))
+
+def adf_test(timeseries):
+    #Perform Dickey-Fuller test:
+    print ('Results of Dickey-Fuller Test:')
+    dftest = adfuller(timeseries, autolag='AIC')
+    dfoutput = pd.Series(dftest[0:4], index=['Test Statistic','p-value','#Lags Used','Number of Observations Used'])
+    for key,value in dftest[4].items():
+       dfoutput['Critical Value (%s)'%key] = value
+    print (dfoutput)
+adf_test(df['Close'].dropna())
+# Close isn't stationary because test statistic > critical values
+
+adf_test(df['diff'].dropna())
+# diff is stationary by the adf test so we can start our ARIMA model !
+
+# Plotting ACF and PACF to check conditions
+smt.graphics.plot_acf(df['diff'].dropna(), lags=22)
+plt.show()
+
+smt.graphics.plot_pacf(df['diff'].dropna(), lags=22)
+plt.show()
+
+df.set_index('Date',inplace=True)
+
+# ARIMA Model
+
+# choosing the order of differencing (d)
+fig , ax = plt.subplots(2,2,figsize=(16,10))
+
+ax[0,0].plot(df.Close.diff())
+ax[0,0].set_title('1st diff')
+plot_acf(df.Close.diff().dropna(), ax= ax[0,1],lags=75)
+
+ax[1,0].plot(df.Close.diff().diff())
+ax[1,0].set_title('2nd diff')
+plot_acf(df.Close.diff().diff().dropna(), ax= ax[1,1],lags=75)
+
+plt.show()
+# 2nd diff goes negative too quickly, might be over differenced
+# let's choose d = 1 as the series get "weakly" stationary to avoid over differencing
+
+# choosing the order of the AR term (p)
+plot_pacf(df.Close.diff().dropna(), lags=75)
+plt.show()
+
+# let's choose p=1 and test, it should be ok as the partial correlation is pretty decent
+
+# The MA term (q)
+plot_acf(df.Close.diff().dropna(),lags=75)
+plt.show()
+
+# We should use q to "fix" the lags over/under the significance line
+# q=0 because there's nothing to fix apparently
+
+# spliting the data
+train = df[df.year<=2019][df.month<10]['Close']
+test = df[df.year>=2019][df.month>=10]['Close']
+
+model = ARIMA(train, order=(1,1,0))
+modelfit = model.fit()
+print(modelfit.summary())
+
+# As we can see, the AR1 term has p>|z| = 0.667 and it should be less than 0.05, so we should not use it
+
+model = ARIMA(train, order=(1,0,0))
+modelfit = model.fit()
+print(modelfit.summary())
+
+#Let's check our performance
+modelfit.plot_predict(dynamic=False,plot_insample=False,)
+plt.plot(train,alpha=0.4)
+plt.show()
+
+forecast = modelfit.forecast(54)[0]
+
+# Evaluation by Mean Absolute Percentage Error (MAPE)
+
+mape = np.mean(np.abs(forecast - test)/np.abs(test))
+print(f'Mean Absolute Percentage Error - {round(mape*100,2)}%')
